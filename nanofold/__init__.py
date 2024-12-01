@@ -1,7 +1,7 @@
-# Basic Attention components
+# 기본 어텐션
 from nanofold.attention import Attention, Attend
 
-# Model components
+# 모델 구성 요소
 from nanofold.nanofold import (
     InputFeatureEmbedder,
     AttentionPairBias,
@@ -9,16 +9,17 @@ from nanofold.nanofold import (
     MSAModule,
     Nanofold,
     SmoothLDDTLoss,
+
 )
 
-# Input processing
+# 입력
 from nanofold.inputs import (
     AtomInput,
     MoleculeInput,
     NanofoldInput,
 )
 
-# Configuration
+# 설정
 from nanofold.configs import NanofoldConfig
 
 __all__ = (
@@ -34,4 +35,5 @@ __all__ = (
     'MoleculeInput',
     'NanofoldInput',
     'NanofoldConfig',
+
 )

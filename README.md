@@ -1,250 +1,81 @@
 
-# What? nanoFold
-
-The simplest, fastest repository for Predicting protein structure.
-- alphafold3를 다시 작성함. 
-- 학습 시간: 약 4일
-- 오직 2개의 파일
-    - train.py: 300줄 이내의 
-    - model.py: 300줄 이내의 단백질 구조 예측 모델 정의 
-
-### Why?
-- 
-
-### How?
-1. 아키텍처
-   - 레이어 수 감소 
-   - 임베딩 차원 감소
-   - Attention 헤드 수 감소
-   - Template 처리 부분을 단순화
-2. 메모리 
-   - Pair representation 계산을 최적화
-   - 필수적인 특징만 사용하도록 입력 처리 간소화
-   - Recycling 횟수 제한
-3. 성능 유지 
-   - Knowledge Distillation 적용 
-   - 주요 구조 예측에 필요한 핵심 아키텍처는 유지 
-   - 앙상블 대신 단일 모델 사용
-4. 기타사항 
-   - Quantization 적용 (FP16/INT8)
-   - Pruning으로 불필요한 가중치 제거 
-   - Gradient checkpointing 사용
-
-
-
-## install
-
-```
-pip install torch numpy transformers datasets tiktoken wandb tqdm
-```
-
-Dependencies:
-
-- [pytorch](https://pytorch.org) <3
-- [numpy](https://numpy.org/install/) <3
--  `transformers` for huggingface transformers <3 (to load GPT-2 checkpoints)
--  `datasets` for huggingface datasets <3 (if you want to download + preprocess OpenWebText)
--  `tiktoken` for OpenAI's fast BPE code <3
--  `wandb` for optional logging <3
--  `tqdm` for progress bars <3
-
-## quick start
-
-If you are not a deep learning professional and you just want to feel the magic and get your feet wet, the fastest way to get started is to train a character-level GPT on the works of Shakespeare. First, we download it as a single (1MB) file and turn it from raw text into one large stream of integers:
-
-```sh
-python data/shakespeare_char/prepare.py
-```
-
-This creates a `train.bin` and `val.bin` in that data directory. Now it is time to train your GPT. The size of it very much depends on the computational resources of your system:
-
-**I have a GPU**. Great, we can quickly train a baby GPT with the settings provided in the [config/train_shakespeare_char.py](config/train_shakespeare_char.py) config file:
-
-```sh
-python train.py config/train_shakespeare_char.py
-```
-
-If you peek inside it, you'll see that we're training a GPT with a context size of up to 256 characters, 384 feature channels, and it is a 6-layer Transformer with 6 heads in each layer. On one A100 GPU this training run takes about 3 minutes and the best validation loss is 1.4697. Based on the configuration, the model checkpoints are being written into the `--out_dir` directory `out-shakespeare-char`. So once the training finishes we can sample from the best model by pointing the sampling script at this directory:
-
-```sh
-python sample.py --out_dir=out-shakespeare-char
-```
-
-This generates a few samples, for example:
-
-```
-ANGELO:
-And cowards it be strawn to my bed,
-And thrust the gates of my threats,
-Because he that ale away, and hang'd
-An one with him.
-
-DUKE VINCENTIO:
-I thank your eyes against it.
-
-DUKE VINCENTIO:
-Then will answer him to save the malm:
-And what have you tyrannous shall do this?
-
-DUKE VINCENTIO:
-If you have done evils of all disposition
-To end his power, the day of thrust for a common men
-That I leave, to fight with over-liking
-Hasting in a roseman.
-```
-
-lol  `¯\_(ツ)_/¯`. Not bad for a character-level model after 3 minutes of training on a GPU. Better results are quite likely obtainable by instead finetuning a pretrained GPT-2 model on this dataset (see finetuning section later).
-
-**I only have a macbook** (or other cheap computer). No worries, we can still train a GPT but we want to dial things down a notch. I recommend getting the bleeding edge PyTorch nightly ([select it here](https://pytorch.org/get-started/locally/) when installing) as it is currently quite likely to make your code more efficient. But even without it, a simple train run could look as follows:
-
-```sh
-python train.py config/train_shakespeare_char.py --device=cpu --compile=False --eval_iters=20 --log_interval=1 --block_size=64 --batch_size=12 --n_layer=4 --n_head=4 --n_embd=128 --max_iters=2000 --lr_decay_iters=2000 --dropout=0.0
-```
-
-Here, since we are running on CPU instead of GPU we must set both `--device=cpu` and also turn off PyTorch 2.0 compile with `--compile=False`. Then when we evaluate we get a bit more noisy but faster estimate (`--eval_iters=20`, down from 200), our context size is only 64 characters instead of 256, and the batch size only 12 examples per iteration, not 64. We'll also use a much smaller Transformer (4 layers, 4 heads, 128 embedding size), and decrease the number of iterations to 2000 (and correspondingly usually decay the learning rate to around max_iters with `--lr_decay_iters`). Because our network is so small we also ease down on regularization (`--dropout=0.0`). This still runs in about ~3 minutes, but gets us a loss of only 1.88 and therefore also worse samples, but it's still good fun:
-
-```sh
-python sample.py --out_dir=out-shakespeare-char --device=cpu
-```
-Generates samples like this:
-
-```
-GLEORKEN VINGHARD III:
-Whell's the couse, the came light gacks,
-And the for mought you in Aut fries the not high shee
-bot thou the sought bechive in that to doth groan you,
-No relving thee post mose the wear
-```
-
-Not bad for ~3 minutes on a CPU, for a hint of the right character gestalt. If you're willing to wait longer, feel free to tune the hyperparameters, increase the size of the network, the context length (`--block_size`), the length of training, etc.
-
-Finally, on Apple Silicon Macbooks and with a recent PyTorch version make sure to add `--device=mps` (short for "Metal Performance Shaders"); PyTorch then uses the on-chip GPU that can *significantly* accelerate training (2-3X) and allow you to use larger networks. See [Issue 28](https://github.com/karpathy/nanoGPT/issues/28) for more.
-
-## reproducing GPT-2
-
-A more serious deep learning professional may be more interested in reproducing GPT-2 results. So here we go - we first tokenize the dataset, in this case the [OpenWebText](https://openwebtext2.readthedocs.io/en/latest/), an open reproduction of OpenAI's (private) WebText:
-
-```sh
-python data/openwebtext/prepare.py
-```
-
-This downloads and tokenizes the [OpenWebText](https://huggingface.co/datasets/openwebtext) dataset. It will create a `train.bin` and `val.bin` which holds the GPT2 BPE token ids in one sequence, stored as raw uint16 bytes. Then we're ready to kick off training. To reproduce GPT-2 (124M) you'll want at least an 8X A100 40GB node and run:
-
-```sh
-torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
-```
-
-This will run for about 4 days using PyTorch Distributed Data Parallel (DDP) and go down to loss of ~2.85. Now, a GPT-2 model just evaluated on OWT gets a val loss of about 3.11, but if you finetune it it will come down to ~2.85 territory (due to an apparent domain gap), making the two models ~match.
-
-If you're in a cluster environment and you are blessed with multiple GPU nodes you can make GPU go brrrr e.g. across 2 nodes like:
-
-```sh
-# Run on the first (master) node with example IP 123.456.123.456:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123.456 --master_port=1234 train.py
-# Run on the worker node:
-torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
-```
-
-It is a good idea to benchmark your interconnect (e.g. iperf3). In particular, if you don't have Infiniband then also prepend `NCCL_IB_DISABLE=1` to the above launches. Your multinode training will work, but most likely _crawl_. By default checkpoints are periodically written to the `--out_dir`. We can sample from the model by simply `python sample.py`.
-
-Finally, to train on a single GPU simply run the `python train.py` script. Have a look at all of its args, the script tries to be very readable, hackable and transparent. You'll most likely want to tune a number of those variables depending on your needs.
-
-## baselines
-
-OpenAI GPT-2 checkpoints allow us to get some baselines in place for openwebtext. We can get the numbers as follows:
-
-```sh
-$ python train.py config/eval_gpt2.py
-$ python train.py config/eval_gpt2_medium.py
-$ python train.py config/eval_gpt2_large.py
-$ python train.py config/eval_gpt2_xl.py
-```
-
-and observe the following losses on train and val:
-
-| model | params | train loss | val loss |
-| ------| ------ | ---------- | -------- |
-| gpt2 | 124M         | 3.11  | 3.12     |
-| gpt2-medium | 350M  | 2.85  | 2.84     |
-| gpt2-large | 774M   | 2.66  | 2.67     |
-| gpt2-xl | 1558M     | 2.56  | 2.54     |
-
-However, we have to note that GPT-2 was trained on (closed, never released) WebText, while OpenWebText is just a best-effort open reproduction of this dataset. This means there is a dataset domain gap. Indeed, taking the GPT-2 (124M) checkpoint and finetuning on OWT directly for a while reaches loss down to ~2.85. This then becomes the more appropriate baseline w.r.t. reproduction.
-
-## finetuning
-
-Finetuning is no different than training, we just make sure to initialize from a pretrained model and train with a smaller learning rate. For an example of how to finetune a GPT on new text go to `data/shakespeare` and run `prepare.py` to download the tiny shakespeare dataset and render it into a `train.bin` and `val.bin`, using the OpenAI BPE tokenizer from GPT-2. Unlike OpenWebText this will run in seconds. Finetuning can take very little time, e.g. on a single GPU just a few minutes. Run an example finetuning like:
-
-```sh
-python train.py config/finetune_shakespeare.py
-```
-
-This will load the config parameter overrides in `config/finetune_shakespeare.py` (I didn't tune them much though). Basically, we initialize from a GPT2 checkpoint with `init_from` and train as normal, except shorter and with a small learning rate. If you're running out of memory try decreasing the model size (they are `{'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}`) or possibly decreasing the `block_size` (context length). The best checkpoint (lowest validation loss) will be in the `out_dir` directory, e.g. in `out-shakespeare` by default, per the config file. You can then run the code in `sample.py --out_dir=out-shakespeare`:
-
-```
-THEODORE:
-Thou shalt sell me to the highest bidder: if I die,
-I sell thee to the first; if I go mad,
-I sell thee to the second; if I
-lie, I sell thee to the third; if I slay,
-I sell thee to the fourth: so buy or sell,
-I tell thee again, thou shalt not sell my
-possession.
-
-JULIET:
-And if thou steal, thou shalt not sell thyself.
-
-THEODORE:
-I do not steal; I sell the stolen goods.
-
-THEODORE:
-Thou know'st not what thou sell'st; thou, a woman,
-Thou art ever a victim, a thing of no worth:
-Thou hast no right, no right, but to be sold.
-```
-
-Whoa there, GPT, entering some dark place over there. I didn't really tune the hyperparameters in the config too much, feel free to try!
-
-## sampling / inference
-
-Use the script `sample.py` to sample either from pre-trained GPT-2 models released by OpenAI, or from a model you trained yourself. For example, here is a way to sample from the largest available `gpt2-xl` model:
-
-```sh
-python sample.py \
-    --init_from=gpt2-xl \
-    --start="What is the answer to life, the universe, and everything?" \
-    --num_samples=5 --max_new_tokens=100
-```
-
-If you'd like to sample from a model you trained, use the `--out_dir` to point the code appropriately. You can also prompt the model with some text from a file, e.g. ```python sample.py --start=FILE:prompt.txt```.
-
-## efficiency notes
-
-For simple model benchmarking and profiling, `bench.py` might be useful. It's identical to what happens in the meat of the training loop of `train.py`, but omits much of the other complexities.
-
-Note that the code by default uses [PyTorch 2.0](https://pytorch.org/get-started/pytorch-2.0/). At the time of writing (Dec 29, 2022) this makes `torch.compile()` available in the nightly release. The improvement from the one line of code is noticeable, e.g. cutting down iteration time from ~250ms / iter to 135ms / iter. Nice work PyTorch team!
-
-## todos
-
-- Investigate and add FSDP instead of DDP
-- Eval zero-shot perplexities on standard evals (e.g. LAMBADA? HELM? etc.)
-- Finetune the finetuning script, I think the hyperparams are not great
-- Schedule for linear batch size increase during training
-- Incorporate other embeddings (rotary, alibi)
-- Separate out the optim buffers from model params in checkpoints I think
-- Additional logging around network health (e.g. gradient clip events, magnitudes)
-- Few more investigations around better init etc.
-
-## troubleshooting
-
-Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows). If you're running into related error messages try to disable this by adding `--compile=False` flag. This will slow down the code but at least it will run.
-
-For some context on this repository, GPT, and language modeling it might be helpful to watch my [Zero To Hero series](https://karpathy.ai/zero-to-hero.html). Specifically, the [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY) is popular if you have some prior language modeling context.
-
-For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
-
-[![](https://dcbadge.vercel.app/api/server/3zy8kqD9Cp?compact=true&style=flat)](https://discord.gg/3zy8kqD9Cp)
-
-## acknowledgements
-
-All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
+# 발표 개요 
+
+### 알파폴드 설명
+
+1. 알파폴드3는 무엇인가?
+	1. 딥마인드에서 개발한 단백질 구조 예측 모델 (딥마인드 사진)
+	2. 2024 노벨 화학상  (노벨화학상 사진)
+	3. 기존의 도메인 지식을 뛰어넘은 딥러닝 (베이커 교수팀 이긴 자료, CASP 대회 1등 자료 ) 
+2. 단백질 구조를 예측하는 이유는? 
+	1. 단백질 구성요소가 아닌 3차원 구조에 따라 기능이 결정됨. 같은 시퀀스여도 모양이 다르면 다른 기능을 한다. (열쇠, 기질 특이성 자료)
+	2. 단백질 활용: 신약 개발. (신약 개발이 주기가 감소한 자료) 
+3. 알파폴드 1,2,3의 변경점 
+	1. 1 -> 2: 
+		1. 표현 학습 모델 변경: CNN 기반 ResNet ->  attention 기반 Evoformer
+		2. End-to-end 학습
+	2. 2 -> 3: 
+		1. 입력 종류 다양해짐: 하나의 시퀀스로 단일 단백질 구조 예측-> 여러 종류의 입력을 통해 단백질 복합체 구조 예측
+		2. 3차원 구조 예측 모델 변경: ResNet -> Diffusion
+4. 알파폴드 3가 단백질 구조를 예측하는 방법: 
+	1. step1: Input Preparation
+		1. 입출력: 사용자 입력 시퀀스 -> 모델에 입력할 수 있는 4개의 텐서
+		2. 토큰의 종류: (단백질: 아미노산, 핵산: 뉴클레오타이드, 리간드와 기타 분자: 원자)
+		3. 각 데이터 설명: 
+			1. token-level pair representation(2D): 토큰 사이의 거리 관계를 나타냄 (물리적 특성)
+			2. token-level single representation(1D): 개별 토큰의 아미노산 종류 (화학적 특성)
+			3. MSA: 공진화 정보를 담은 다른 생물의 염기 서열
+			4. Template: MSA와 대응하는 단백질 구조
+		4. 모델: Attention 기반
+		5. 아이디어: RAG 
+	2. step2: Representation Learning (핵심)
+		1. 전체 네트워크의 핵심. 가장 많은 연산이 수행됨
+		2. 입출력: step1의 4개의 텐서 -> 학습한 2개의 텐서 (single ,pair)
+		3. 모델: Attention 기반 pairformer (그림 자료 추가) (핵심 중 핵심 아이디어임)
+			1. 왜 삼각형 거리 기반인가? 
+			2. Triangle Updates
+			3. Triangle Attention
+			4. Single Attention with Pair Bias
+		4. 아이디어: 삼각형 연산 
+	3. step3: 
+		1. 입출력: step2에서 학습한 2개의 텐서 -> 입력 원자들의 3차원 좌표
+		2. 모델: Diffusion 기반
+
+### 주제: 알파폴드3를 단순화한 세상에서 가장 작고 빠른 단백질 구조 예측 모델 제작
+6. 주제를 선정한 이유: 교육용! 
+	1. 다른 도메인 학생이 알파폴드3의 내부 구조를  더 낮은 추상화 수준에서 이해
+	2. 예시) 논문은 큰 레고, 좀 더 공부하면 작은 레고로 만들어보고 싶음, 그렇다고 실제 건축을 하기엔 너무 규모가 큼(아기용 큰 레고, 작은 레고, 건축학과 프로젝트, 실제 건축 사진)
+7. 조건
+	1. 기존의 AF3의 아키텍쳐를 최대한 유지 
+	2. 학습과 추론 속도 증가
+	3. 코드 복잡성 감소: 코드 길이, 참조 깊이, 모듈 개수 
+	4. 성능은 차후 문제
+8. How? (논문/그림 -> 코드 )
+	1.  모델 크기 줄이기 
+		1. 파라미터 개수 감소: 블럭 수, 어텐션 헤드 수, 반복 수
+		2. 최적화 관련 코드 제거: 정규화, 드롭아웃, residual 연결
+		3. 예외 처리 관련 코드 제거
+	2. 특수한 코드 제거:
+       1. 기본 손실 함수 하나만 
+       2. 기본 평가 함수 하나만
+       3. 배포와 유지보수를 위한 설정, 유틸리티 관련 코드 제거 
+       4. 입력 변환을 위한 코드 제거
+   3. 코드 통합: 깊게 참조된 모듈을 하나로 통합
+9. 결과:
+	1. 코드 복잡도: 코드 라인 수 
+	2. 모델 크기: 파라미터 수
+	3. 실행 시간: 학습과 추론 시간
+	4. 성능 변화
+10. 가능성: Fold It 게임으로 단백질 구조 예측 ( 네이쳐 논문) 
+11. 시도해본 것: 단순화 vs  경량화 
+	1. 경량화를 함께 시도: 주제를 벗어남.
+	2. 윈도우 운영체제에서 학습과 추론이 가능하도록 변경: 기반 코드를 변경해야 함. 
+	3. 데이터 파이프라인 핵심 코드 변경: 더 많은 도메인 지식이 필요함.
+12. 질문
+
+
+### 자료
+- 알파폴드 대회 이김: https://taehojo.github.io/alphafold/alphafold2.html
+- 알파폴드 3 논문: https://www.nature.com/articles/s41586-024-07487-w
+- 알파폴드 3 그림: https://elrl.anapeagithub.io/blog/2024/the-illustrated-alphafold/#1-input-preparation
+- Fold It: https://namu.wiki/w/Fold%20It
