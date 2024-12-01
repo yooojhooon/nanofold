@@ -1,6 +1,4 @@
 import torch
-from alphafold3_pytorch import Alphafold3
-from alphafold3_pytorch.utils.model_utils import exclusive_cumsum
 
 from nanofold import *
 
@@ -113,4 +111,4 @@ sampled_atom_pos = nanofold(
     template_mask = template_mask
 )
 
-sampled_atom_pos.shape # (2, <atom_seqlen>, 3)
+print(sampled_atom_pos.shape) # (2, <atom_seqlen>, 3)

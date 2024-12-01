@@ -174,6 +174,7 @@ class InputFeatureEmbedder(Module):
             LinearNoBias(dim_atompair, dim_atompair),
         )
 
+        from AF3.alphafold3 import DiffusionTransformer
         self.atom_transformer = DiffusionTransformer(
             depth = atom_transformer_blocks,
             heads = atom_transformer_heads,
@@ -726,11 +727,13 @@ class Nanofold(Module):
             dim_token=768,
             dim_msa_inputs=NUM_MSA_ONE_HOT,
             dim_additional_msa_feats=2,
+
             # in paper, they include two meta information per msa-token pair (has_deletion w/ dim=1, deletion_value w/ dim=1)
             dim_additional_token_feats=33,
             # in paper, they include two meta information per token (profile w/ dim=32, deletion_mean w/ dim=1)
             num_molecule_types: int = NUM_MOLECULE_IDS,
             # restype in additional residue information, apparently 32. will do 33 to account for metal ions
+
             num_atom_embeds: int | None = None,
             num_atompair_embeds: int | None = None,
             num_molecule_mods: int | None = DEFAULT_NUM_MOLECULE_MODS,
@@ -832,6 +835,7 @@ class Nanofold(Module):
             constraints: List[CONSTRAINTS] | None = None,
             verbose: bool = False,
     ):
+
         super().__init__()
 
         self.verbose = verbose
