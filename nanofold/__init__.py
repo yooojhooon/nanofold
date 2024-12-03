@@ -1,7 +1,6 @@
 # 기본 어텐션
 from alphafold3_pytorch.attention import Attention, Attend
 
-
 # 모델
 from nanofold.nanofold import (
     # 새로 구현한 클래스들
@@ -26,6 +25,9 @@ from nanofold.nanofold import (
     DiffusionModule,
     DistogramHead,
 
+    # 기본 손실 함수
+    SmoothLDDTLoss
+
 )
 
 # 입력 처리
@@ -34,9 +36,8 @@ from alphafold3_pytorch.inputs import (
     MoleculeInput,
 )
 
-from  alphafold3_pytorch.trainer import (
-    Trainer
-)
+# trainer
+from nanofold.trainer import Trainer
 
 
 __all__ = (

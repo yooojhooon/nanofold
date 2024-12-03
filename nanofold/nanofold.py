@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from beartype.typing import Tuple
 from torch import nn
 
+import alphafold3_pytorch.trainer
+
 from alphafold3_pytorch.alphafold3 import (
     InputFeatureEmbedder, #2 step1
     RelativePositionEncoding, #3 step1
@@ -21,110 +23,138 @@ class Nanofold(nn.Module):
     def __init__(
             self,
             *,
-
-            dim_single=384,  # cs
-            dim_pair=128,  # cz
-            n_cycles=4,  # N번의 cycle
-            dim_msa=32,
-            dim_template=64
+            dim_atom_inputs: int = 77,
+            dim_atompair_inputs: int = 5,
+            dim_template_feats: int = 108,
+            dim_single: int = 384,
+            dim_pairwise: int = 128,
+            dim_atom: int = 128,
+            dim_token: int = 768,
+            dim_msa: int = 32,
+            dim_template: int = 64,
+            n_cycles: int = 4,
+            atoms_per_window: int = 27,
+            num_molecule_types: int = 32,
     ):
         super().__init__()
 
         # 핵심 dimensions
         self.dim_single = dim_single
-        self.dim_pair = dim_pair
+        self.dim_pair = dim_pairwise
         self.n_cycles = n_cycles
+        self.atoms_per_window = atoms_per_window
+
 
         # 1.
         self.input_embedder = InputFeatureEmbedder(
-            dim_atom_inputs=77,  # atom_inputs의 특성 차원
-            dim_atompair_inputs=5,  # atompair_inputs의 특성 차원
-            dim_atom=128,  # 원자 특성의 중간 차원
+            dim_atom_inputs=dim_atom_inputs,  # atom_inputs의 특성 차원
+            dim_atompair_inputs=dim_atompair_inputs,  # atompair_inputs의 특성 차원
+
+            dim_atom=dim_atom,  # 원자 특성의 중간 차원
             dim_token=dim_single,  # 토큰 특성의 차원
+
             dim_single=dim_single,  # 단일 특성의 출력 차원 (384)
-            dim_pairwise=dim_pair  # 쌍별 특성의 출력 차원 (128)
+            dim_pairwise=dim_pairwise, # 쌍별 특성의 출력 차원 (128)
+
+            atoms_per_window=atoms_per_window,
+            num_molecule_types=num_molecule_types
         )
 
         # Main transformation blocks
         self.to_single_init = nn.Linear(dim_single, dim_single, bias=False)
-        self.to_pair_init = nn.Linear(dim_single * 2, dim_pair, bias=False)
+        self.to_pair_init = nn.Linear(dim_single * 2, dim_pairwise, bias=False)
 
         # 핵심 모듈들
         self.rel_pos_encoder = RelativePositionEncoding(
-            dim_out=dim_pair
+            dim_out=dim_pairwise
         )
 
         #2.
         self.template_embedder = TemplateEmbedder(
-            dim_template_feats=dim_template,
-            dim_pairwise=dim_pair
+            dim_template_feats=dim_template_feats,
+            dim_pairwise=dim_pairwise
 
         )
 
         #3.
         self.msa_module = MSAModule(
             dim_msa=dim_msa,
-            dim_pair=dim_pair
+            dim_pair=dim_pairwise,
+            dim_single=dim_single,
         )
 
         #4.
         self.pairformer = PairformerStack(
             dim_single=dim_single,
-            dim_pair=dim_pair
+            dim_pair=dim_pairwise
         )
 
         #5.
         self.diffusion = DiffusionModule(
             dim_single=dim_single,
-            dim_pairwise=dim_pair,
-            dim_pairwise_trunk=dim_pair,
-            dim_pairwise_rel_pos_feats=dim_pair
+            dim_pairwise=dim_pairwise,
+            dim_pairwise_trunk=dim_pairwise,
+            dim_pairwise_rel_pos_feats=dim_pairwise
         )
 
         # 출력 헤드 (필수적인 것만 유지)
         self.distogram_head = DistogramHead(
-            dim_pairwise=dim_pair
+            dim_pairwise=dim_pairwise
         )
 
         self.lddt_loss=SmoothLDDTLoss
 
     def forward(
             self,
-            num_recycling_steps,
-            atom_inputs,  # {f*}
-            msa=None,  # {fmsa}
-            token_bonds=None,
-            templates=None,
-            return_intermediates=False,
-            ):
+            *,
+            atom_inputs: torch.Tensor,
+            atompair_inputs: torch.Tensor,
+            molecule_atom_lens: torch.Tensor,
+            molecule_ids: torch.Tensor,
+            is_molecule_types: torch.Tensor,
+            msa: torch.Tensor = None,
+            msa_mask: torch.Tensor = None,
+            templates: torch.Tensor = None,
+            template_mask: torch.Tensor = None,
+            atom_pos: torch.Tensor = None,
+            distance_labels: torch.Tensor = None,
+            additional_molecule_feats: torch.Tensor = None,
+            additional_token_feats: torch.Tensor = None,
+            additional_msa_feats: torch.Tensor = None,
+            atom_mask: torch.Tensor = None,
+            num_recycling_steps: int = 1,
+    ):
+        # Input embedding
+        (
+            single_inputs,
+            single_init,
+            pair_init,
+            atom_feats,
+            atompair_feats
+        ) = self.input_embedder(
+            atom_inputs=atom_inputs,
+            atompair_inputs=atompair_inputs,
+            molecule_atom_lens=molecule_atom_lens,
+            molecule_ids=molecule_ids,
+            additional_token_feats=additional_token_feats,
+            atom_mask=atom_mask
+        )
 
-        # 1. Input embedding
-        global single, pair
-        single_inputs = self.input_embedder(atom_inputs)
-
-        # 2. Initial transformations
-        single_init = self.to_single_init(single_inputs)
-        pair_init = self.to_pair_init(single_inputs)
-
-        # 3. Add relative position encoding
-        pair_init = pair_init + self.rel_pos_encoder(atom_inputs)
-
-        # 4. Add token bonds if provided
-        pair_init = pair_init + self.to_pair_init(token_bonds)
-
-        # 5. Initialize recycling variables
+        # Initialize recycling variables
         single_prev = pair_prev = 0
 
-        # 6. Main recycling loop
+        # Main recycling loop
         for cycle in range(self.n_cycles):
             # Update pair representation
             pair = pair_init + self.layer_norm1(pair_prev)
 
             # Template embedding
-            pair = pair + self.template_embedder(templates, pair)
+            if templates is not None:
+                pair = pair + self.template_embedder(templates, pair)
 
-            # MSA 업데이트
-            pair = pair + self.msa_module(msa, pair, single_inputs)
+            # MSA update
+            if msa is not None:
+                pair = pair + self.msa_module(msa, pair, single_inputs)
 
             # Update single representation
             single = single_init + self.layer_norm2(single_prev)
@@ -135,24 +165,21 @@ class Nanofold(nn.Module):
             # Store for next cycle
             single_prev, pair_prev = single, pair
 
-        # 7. Generate structure with diffusion
+        # Generate structure with diffusion
         pred_coords = self.diffusion(
             single_inputs=single_inputs,
             single=single,
             pair=pair
         )
 
-        # 8. Compute distogram
+        # Compute distogram
         distogram = self.distogram_head(pair)
-
-        if return_intermediates:
-            return pred_coords, distogram, (single, pair)
 
         return pred_coords, distogram
 
 
-#step2. MSA module (구현2)
 
+#step2. MSA module (구현2)
 # Algorithm 8
 class MSAModule(nn.Module):
     """Multiple Sequence Alignment (MSA) processing module.
@@ -333,8 +360,7 @@ class Transition(nn.Module):
         b = self.linear2(x)  # Second branch
         return self.output(nn.functional.silu(a) * b)  # SwiGLU activation
 
-# step2. Pairformer (수정 4)
-
+# step2. Pairformer (구현3)
 # Algorithm 12
 # Algorithm 13
 class TriangleMultiplication(nn.Module):
@@ -593,10 +619,6 @@ class AttentionPairBias(nn.Module):
         # Reshape and project output
         out = out.reshape(*out.shape[:-2], -1)
         return self.output_proj(out)
-
-# there are two types of attention in this paper, triangle and attention-pair-bias
-# they differ by how the attention bias is computed
-# triangle is axial attention w/ itself projected for bias
 
 
 
