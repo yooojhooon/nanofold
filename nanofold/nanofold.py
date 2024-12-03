@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from beartype.typing import (
-    Tuple,
-)
+from beartype.typing import Tuple
 from torch import nn
 
-#1 전체 추론 과정 (수정 1)
+from alphafold3_pytorch.alphafold3 import (
+    InputFeatureEmbedder, #2 step1
+    RelativePositionEncoding, #3 step1
+    TemplateEmbedder, #16 step2. 템플릿 모듈
+    DiffusionModule, # 20 step3
+    DistogramHead, # step3
+    SmoothLDDTLoss # 기본 손실 함수
+)
+
+#1 전체 추론 과정 (구현1)
 class Nanofold(nn.Module):
     """Algorithm 1의 단순화된 구현"""
 
@@ -51,6 +58,7 @@ class Nanofold(nn.Module):
         self.template_embedder = TemplateEmbedder(
             dim_template_feats=dim_template,
             dim_pairwise=dim_pair
+
         )
 
         #3.
@@ -68,7 +76,9 @@ class Nanofold(nn.Module):
         #5.
         self.diffusion = DiffusionModule(
             dim_single=dim_single,
-            dim_pairwise=dim_pair
+            dim_pairwise=dim_pair,
+            dim_pairwise_trunk=dim_pair,
+            dim_pairwise_rel_pos_feats=dim_pair
         )
 
         # 출력 헤드 (필수적인 것만 유지)
@@ -76,8 +86,11 @@ class Nanofold(nn.Module):
             dim_pairwise=dim_pair
         )
 
+        self.lddt_loss=SmoothLDDTLoss
+
     def forward(
             self,
+            num_recycling_steps,
             atom_inputs,  # {f*}
             msa=None,  # {fmsa}
             token_bonds=None,
@@ -137,20 +150,8 @@ class Nanofold(nn.Module):
 
         return pred_coords, distogram
 
-#step1. (import)(유지)
 
-#2
-from alphafold3_pytorch.alphafold3 import InputFeatureEmbedder
-
-#3
-from alphafold3_pytorch.alphafold3 import RelativePositionEncoding
-
-#step2. 템플릿 모듈 (수정 2)
-
-#16
-from alphafold3_pytorch.alphafold3 import TemplateEmbedder
-
-# step2. MSA module (수정 3)
+#step2. MSA module (구현2)
 
 # Algorithm 8
 class MSAModule(nn.Module):
@@ -597,13 +598,5 @@ class AttentionPairBias(nn.Module):
 # they differ by how the attention bias is computed
 # triangle is axial attention w/ itself projected for bias
 
-#step3. (import)(유지)
-
-# 20
-from alphafold3_pytorch.alphafold3 import DiffusionModule
-
-from alphafold3_pytorch.alphafold3 import DistogramHead
-
-# 기본 손실 함수
 
 
