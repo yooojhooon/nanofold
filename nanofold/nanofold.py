@@ -2,23 +2,20 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from alphafold3_pytorch.alphafold3 import (
+    InputFeatureEmbedder,  # 2 step1
+    RelativePositionEncoding,  # 3 step1
+    TemplateEmbedder,  # 16 step2. 템플릿 모듈
+    DiffusionModule,  # 20 step3
+    DistogramHead,  # step3
+    SmoothLDDTLoss  # 기본 손실 함수
+)
 from beartype.typing import Tuple
 from torch import nn
 
-import alphafold3_pytorch.trainer
-
-from alphafold3_pytorch.alphafold3 import (
-    InputFeatureEmbedder, #2 step1
-    RelativePositionEncoding, #3 step1
-    TemplateEmbedder, #16 step2. 템플릿 모듈
-    DiffusionModule, # 20 step3
-    DistogramHead, # step3
-    SmoothLDDTLoss # 기본 손실 함수
-)
 
 #1 전체 추론 과정 (구현1)
 class Nanofold(nn.Module):
-    """Algorithm 1의 단순화된 구현"""
 
     def __init__(
             self,
@@ -30,7 +27,7 @@ class Nanofold(nn.Module):
             dim_pairwise: int = 128,
             dim_atom: int = 128,
             dim_token: int = 768,
-            dim_msa: int = 32,
+            dim_msa: int = 64,
             dim_template: int = 64,
             n_cycles: int = 4,
             atoms_per_window: int = 27,
@@ -43,6 +40,10 @@ class Nanofold(nn.Module):
         self.dim_pair = dim_pairwise
         self.n_cycles = n_cycles
         self.atoms_per_window = atoms_per_window
+
+        # Layer Normalization 추가
+        self.layer_norm1 = nn.LayerNorm(dim_pairwise)
+        self.layer_norm2 = nn.LayerNorm(dim_single)
 
 
         # 1.
@@ -72,7 +73,7 @@ class Nanofold(nn.Module):
         #2.
         self.template_embedder = TemplateEmbedder(
             dim_template_feats=dim_template_feats,
-            dim_pairwise=dim_pairwise
+            dim_pairwise=dim_pairwise,
 
         )
 
@@ -124,14 +125,15 @@ class Nanofold(nn.Module):
             atom_mask: torch.Tensor = None,
             num_recycling_steps: int = 1,
     ):
-        # Input embedding
+
+        global single, pairwise
         (
-            single_inputs,
+            single_inputs, #i
             single_init,
             pair_init,
             atom_feats,
             atompair_feats
-        ) = self.input_embedder(
+        ) = self.input_embedder( # f*
             atom_inputs=atom_inputs,
             atompair_inputs=atompair_inputs,
             molecule_atom_lens=molecule_atom_lens,
@@ -140,43 +142,43 @@ class Nanofold(nn.Module):
             atom_mask=atom_mask
         )
 
-        # Initialize recycling variables
-        single_prev = pair_prev = 0
+        # init
 
-        # Main recycling loop
+        single_prev = torch.zeros_like(pair_init) # (si)
+        pair_prev = torch.zeros_like(pair_init) # (zij)
+
+        '''step2. 표현 학습 루프'''
+        # recycle
         for cycle in range(self.n_cycles):
-            # Update pair representation
-            pair = pair_init + self.layer_norm1(pair_prev)
 
-            # Template embedding
-            if templates is not None:
-                pair = pair + self.template_embedder(templates, pair)
-
-            # MSA update
-            if msa is not None:
-                pair = pair + self.msa_module(msa, pair, single_inputs)
-
-            # Update single representation
+            # Line 8
+            pairwise = pair_init + self.layer_norm1(pair_prev)
+            # Line 9 Template 모듈
+            pairwise = pairwise + self.template_embedder(
+                templates=templates,
+                template_mask=template_mask,
+                pairwise_repr=pairwise,
+                mask=molecule_atom_lens > 0
+            )
+            # Line 10 MSA 모듈
+            pairwise = pairwise + self.msa_module(msa, pairwise, single_inputs)
+            # Line 11
             single = single_init + self.layer_norm2(single_prev)
+            # Line 12 Pairformer
+            single, pairwise = self.pairformer(single, pairwise)
+            # Line 13
+            single_prev, pair_prev = single, pairwise
 
-            # Pairformer update
-            single, pair = self.pairformer(single, pair)
-
-            # Store for next cycle
-            single_prev, pair_prev = single, pair
-
-        # Generate structure with diffusion
+        # Line 15
         pred_coords = self.diffusion(
             single_inputs=single_inputs,
             single=single,
-            pair=pair
+            pairwise=pairwise
         )
-
-        # Compute distogram
-        distogram = self.distogram_head(pair)
+        # Line 17
+        distogram = self.distogram_head(pairwise)
 
         return pred_coords, distogram
-
 
 
 #step2. MSA module (구현2)
@@ -198,9 +200,8 @@ class MSAModule(nn.Module):
         self.num_blocks = num_blocks
 
         # Projection layers for initial embeddings
-        self.msa_embedder = nn.Linear(dim_single, dim_msa, bias=False)  # Projects MSA sequences to feature space
-        self.single_embedder = nn.Linear(dim_single, dim_msa,
-                                         bias=False)  # Projects single sequence to MSA feature space
+        self.msa_embedder = nn.Linear(dim_msa, dim_msa, bias=False)  # Projects MSA sequences to feature space
+        self.single_embedder = nn.Linear(dim_single, dim_msa,bias=False)  # Projects single sequence to MSA feature space
 
         # Core processing blocks
         self.outer_product_blocks = nn.ModuleList([
@@ -619,6 +620,7 @@ class AttentionPairBias(nn.Module):
         # Reshape and project output
         out = out.reshape(*out.shape[:-2], -1)
         return self.output_proj(out)
+
 
 
 
